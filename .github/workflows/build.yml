@@ -54,6 +54,8 @@ jobs:
 
       - name: Build (VLC sources + contribs + libvlc.so, license "a")
         run: |
+          # The container runs as another user than the runner: let it write into the mounted checkout.
+          chmod -R a+rwX libvlcjni
           docker run --rm -v "$PWD/libvlcjni:/work" -w /work ${{ matrix.image }} bash -c '
             set -ex
             git config --global user.email "ci@localhost"
@@ -113,6 +115,7 @@ jobs:
       - name: Build the AAR
         run: |
           IMAGE=registry.videolan.org/vlc-debian-android:20260611225331
+          chmod -R a+rwX libvlcjni
           docker pull $IMAGE
           docker run --rm -e GRADLE_ABI=all -v "$PWD/libvlcjni:/work" -w /work $IMAGE bash -c '
             set -ex
@@ -126,6 +129,7 @@ jobs:
 
       - name: Collect AAR and build info
         run: |
+          git config --global --add safe.directory '*'
           mkdir -p out
           cp libvlcjni/libvlc/build/outputs/aar/*release*.aar out/ || cp libvlcjni/libvlc/build/outputs/aar/*.aar out/
           cd out
