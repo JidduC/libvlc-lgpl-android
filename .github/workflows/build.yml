@@ -13,6 +13,9 @@ on:
       libvlcjni_ref:
         description: "libvlcjni commit or branch (default: pinned commit of libvlcjni-3.x)"
         default: "0b8dc65efb203c86a0476bc337ddd99ecf1c0ef6"
+      license:
+        description: "Contribs license flag of libvlcjni: a = LGPLv2.1 (no TLS: gnutls needs LGPLv3 parts), l = LGPLv3 (with gnutls/nettle/gmp, so https works)"
+        default: "a"
       publish:
         description: "Publish a GitHub release with the AAR"
         type: boolean
@@ -52,7 +55,7 @@ jobs:
       - name: Pull VideoLAN build image
         run: docker pull ${{ matrix.image }}
 
-      - name: Build (VLC sources + contribs + libvlc.so, license "a")
+      - name: Build (VLC sources + contribs + libvlc.so)
         run: |
           # The container runs as another user than the runner: let it write into the mounted checkout.
           chmod -R a+rwX libvlcjni
@@ -64,7 +67,7 @@ jobs:
             echo "ANDROID_NDK=$ANDROID_NDK ANDROID_SDK=$ANDROID_SDK ANDROID_HOME=$ANDROID_HOME"
             ./buildsystem/get-vlc.sh
             git -C vlc log -1 --format="vlc %H %s"
-            ./buildsystem/compile-libvlc.sh -a ${{ matrix.abi }} --release --license a
+            ./buildsystem/compile-libvlc.sh -a ${{ matrix.abi }} --release --license ${{ inputs.license }}
           '
 
       - name: Check that no GPL-only component got in
@@ -135,7 +138,7 @@ jobs:
           cd out
           ls -la
           {
-            echo "LibVLC for Android, LGPL build (license flag: a = LGPLv2.1 + ad-clauses, no GPL components)"
+            echo "LibVLC for Android, LGPL build (contribs license flag: ${{ inputs.license }}; a = LGPLv2.1 + ad-clauses, l = LGPLv3 + ad-clauses; no GPL components)"
             echo "libvlcjni: $(git -C ../libvlcjni rev-parse HEAD)  (https://code.videolan.org/videolan/libvlcjni)"
             echo "vlc:       $(git -C ../libvlcjni/vlc rev-parse HEAD)  (https://code.videolan.org/videolan/vlc, branch 3.0.x, patched with libvlcjni/libvlc/patches)"
             echo "built by:  GitHub Actions run ${GITHUB_RUN_ID} of ${GITHUB_REPOSITORY}"
@@ -168,5 +171,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="libvlc-lgpl-run-${GITHUB_RUN_NUMBER}"
-          gh release create "$tag" out/* --repo "$GITHUB_REPOSITORY" --title "LibVLC LGPL build #${GITHUB_RUN_NUMBER}" \
+          gh release create "$tag" out/* --repo "$GITHUB_REPOSITORY" --title "LibVLC LGPL build #${GITHUB_RUN_NUMBER} (license ${{ inputs.license }})" \
             --notes "LibVLC for Android built without GPL components. See BUILD-INFO.txt for the exact source commits. Library license: LGPL 2.1 (the source of libvlcjni and VLC is at the URLs in BUILD-INFO.txt, and the exact build recipe is .github/workflows/build.yml in this repository)."
