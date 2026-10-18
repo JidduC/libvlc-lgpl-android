@@ -1,0 +1,168 @@
+name: Build LibVLC for Android (LGPL, without GPL components)
+
+# Builds the libvlc-android library (libvlcjni 3.x branch, VLC 3.0.x engine) with the contribs license
+# set to "a" = LGPLv2.1 + ad-clauses (libvlcjni's own `--license a` option). With it, the contribs are
+# built with --disable-gpl: no x264, no live555 (RTSP), no libdvdread/libdvdnav/libdvdcss, so the
+# resulting libvlc.so can be shipped under the LGPL by closed-source apps.
+#
+# It uses VideoLAN's own public build images (registry.videolan.org), the same ones libvlcjni's CI uses.
+
+on:
+  workflow_dispatch:
+    inputs:
+      libvlcjni_ref:
+        description: "libvlcjni commit or branch (default: pinned commit of libvlcjni-3.x)"
+        default: "0b8dc65efb203c86a0476bc337ddd99ecf1c0ef6"
+      publish:
+        description: "Publish a GitHub release with the AAR"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  libs:
+    name: native libraries (${{ matrix.abi }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # 64-bit needs NDK r27-r29 (image "vlc-debian-android"); 32-bit needs NDK r21 (image "vlc-debian-android-3.0").
+          # Both images are the ones libvlcjni's own .gitlab-ci.yml uses for these ABIs.
+          - abi: arm64
+            image: registry.videolan.org/vlc-debian-android:20260611225331
+          - abi: arm
+            image: registry.videolan.org/vlc-debian-android-3.0:20260701183656
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift
+          sudo docker image prune --all --force || true
+          df -h /
+
+      - name: Get libvlcjni
+        run: |
+          git clone https://code.videolan.org/videolan/libvlcjni libvlcjni
+          git -C libvlcjni checkout "${{ inputs.libvlcjni_ref }}"
+          git -C libvlcjni log -1 --format='libvlcjni %H %s'
+
+      - name: Pull VideoLAN build image
+        run: docker pull ${{ matrix.image }}
+
+      - name: Build (VLC sources + contribs + libvlc.so, license "a")
+        run: |
+          docker run --rm -v "$PWD/libvlcjni:/work" -w /work ${{ matrix.image }} bash -c '
+            set -ex
+            git config --global user.email "ci@localhost"
+            git config --global user.name "ci"
+            git config --global --add safe.directory "*"
+            echo "ANDROID_NDK=$ANDROID_NDK ANDROID_SDK=$ANDROID_SDK ANDROID_HOME=$ANDROID_HOME"
+            ./buildsystem/get-vlc.sh
+            git -C vlc log -1 --format="vlc %H %s"
+            ./buildsystem/compile-libvlc.sh -a ${{ matrix.abi }} --release --license a
+          '
+
+      - name: Check that no GPL-only component got in
+        run: |
+          find libvlcjni/libvlc/jni/libs -type f | sort
+          for f in $(find libvlcjni/libvlc/jni/libs -name 'libvlc.so'); do
+            echo "== $f"
+            for word in x264 libdvdnav libdvdread libdvdcss live555 "GNU General Public License"; do
+              n=$(strings -a "$f" | grep -ci "$word" || true)
+              echo "   $word: $n"
+            done
+          done
+
+      - name: Upload native libraries
+        uses: actions/upload-artifact@v4
+        with:
+          name: libs-${{ matrix.abi }}
+          path: libvlcjni/libvlc/jni/libs
+          retention-days: 30
+
+  aar:
+    name: AAR (all ABIs)
+    needs: libs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift
+          df -h /
+
+      - name: Get libvlcjni
+        run: |
+          git clone https://code.videolan.org/videolan/libvlcjni libvlcjni
+          git -C libvlcjni checkout "${{ inputs.libvlcjni_ref }}"
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: libvlcjni/libvlc/jni/libs-download
+
+      - name: Put the native libraries where the gradle module expects them
+        run: |
+          mkdir -p libvlcjni/libvlc/jni/libs
+          for d in libvlcjni/libvlc/jni/libs-download/libs-*; do cp -r "$d"/* libvlcjni/libvlc/jni/libs/; done
+          rm -rf libvlcjni/libvlc/jni/libs-download
+          find libvlcjni/libvlc/jni/libs -type f | sort
+
+      - name: Build the AAR
+        run: |
+          IMAGE=registry.videolan.org/vlc-debian-android:20260611225331
+          docker pull $IMAGE
+          docker run --rm -e GRADLE_ABI=all -v "$PWD/libvlcjni:/work" -w /work $IMAGE bash -c '
+            set -ex
+            git config --global user.email "ci@localhost"
+            git config --global user.name "ci"
+            git config --global --add safe.directory "*"
+            ./buildsystem/get-vlc.sh
+            gradle assembleRelease --no-daemon
+          '
+          find libvlcjni/libvlc/build/outputs -name '*.aar'
+
+      - name: Collect AAR and build info
+        run: |
+          mkdir -p out
+          cp libvlcjni/libvlc/build/outputs/aar/*release*.aar out/ || cp libvlcjni/libvlc/build/outputs/aar/*.aar out/
+          cd out
+          ls -la
+          {
+            echo "LibVLC for Android, LGPL build (license flag: a = LGPLv2.1 + ad-clauses, no GPL components)"
+            echo "libvlcjni: $(git -C ../libvlcjni rev-parse HEAD)  (https://code.videolan.org/videolan/libvlcjni)"
+            echo "vlc:       $(git -C ../libvlcjni/vlc rev-parse HEAD)  (https://code.videolan.org/videolan/vlc, branch 3.0.x, patched with libvlcjni/libvlc/patches)"
+            echo "built by:  GitHub Actions run ${GITHUB_RUN_ID} of ${GITHUB_REPOSITORY}"
+            echo "built at:  $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } > BUILD-INFO.txt
+          sha256sum *.aar > SHA256SUMS.txt
+          cat BUILD-INFO.txt SHA256SUMS.txt
+
+      - name: Upload AAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: libvlc-lgpl-aar
+          path: out
+          retention-days: 90
+
+  release:
+    name: Publish release
+    needs: aar
+    if: ${{ inputs.publish }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: libvlc-lgpl-aar
+          path: out
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="libvlc-lgpl-run-${GITHUB_RUN_NUMBER}"
+          gh release create "$tag" out/* --repo "$GITHUB_REPOSITORY" --title "LibVLC LGPL build #${GITHUB_RUN_NUMBER}" \
+            --notes "LibVLC for Android built without GPL components. See BUILD-INFO.txt for the exact source commits. Library license: LGPL 2.1 (the source of libvlcjni and VLC is at the URLs in BUILD-INFO.txt, and the exact build recipe is .github/workflows/build.yml in this repository)."
